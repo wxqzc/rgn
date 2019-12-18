@@ -322,7 +322,7 @@ def tmscore(u, v, weights, num_steps, batch_size, name=None):
 
         data = tf.concat([coords, params], axis=1)  # [BATCH_SIZE, 2*NUM_STEPS+7, NUM_DIMENSIONS+1]
 
-        tm_scores = tf.scan(minimize_tm, data, name=scope)  # [BATCH_SIZE]  # TODO fix dit! Zie docs
+        tm_scores = tf.scan(minimize_tm, data, initializer=tf.constant(.0), name=scope)  # [BATCH_SIZE]
 
         return tm_scores
 
@@ -340,15 +340,15 @@ def minimize_tm(_, data, name=None):
     with tf.name_scope(name, 'minimized_tm_score', [data]) as scope:
         data = tf.convert_to_tensor(data, name='coords')
 
-        # TODO Gaat dit werken??
         # Unpack data
-        coords = data[:-7, :]  # [2*NUM_STEPS, NUM_DIMENSIONS+1]
-        params = data[-7:, 0]  # [7]
+        coords = data[:-7, :]                 # [2*NUM_STEPS, NUM_DIMENSIONS+1]
+        params = data[-7:-1, 0]               # [6]
+        d02    = data[-1, 0]                  # []
         c1, c2 = tf.split(coords, 2, axis=0)  # [NUM_STEPS, NUM_DIMENSIONS+1]
-        dx, dy, dz, theta, phi, psi, d02 = [tf.squeeze(i) for i in tf.split(params, 7, axis=0)]  # []
 
         # Define scoring methods
-        def tm_score(dx, dy, dz, theta, phi, psi):
+        def tm_score(params):
+            dx, dy, dz, theta, phi, psi = [tf.squeeze(i) for i in tf.split(params, 6)]  # []
             matrix = get_matrix(dx, dy, dz, theta, phi, psi, name=scope)  # [NUM_DIMENSIONS+1, NUM_DIMENSIONS+1]
             dist = tf.matmul(c2, matrix) - c1                             # [NUM_STEPS, NUM_DIMENSIONS+1]
             d_i2 = tf.reduce_sum(dist, axis=-1) ** 2                      # [NUM_STEPS]
@@ -357,31 +357,18 @@ def minimize_tm(_, data, name=None):
             tm = one / (one + (d_i2 / d02))                               # [NUM_STEPS]
             return tm
 
-        def tm_sum(dx, dy, dz, theta, phi, psi):
-            return tf.reduce_sum(tm_score(dx, dy, dz, theta, phi, psi))
+        def tm_sum(params):
+            return tf.reduce_sum(tf.map_fn(tm_score, params), axis=-1)
 
-        # Minimize parameters
-
-        # m = Minuit(tm_sum,
-        #            error_dx=1., error_dy=1., error_dz=1.,
-        #            error_theta=.01, error_phi=.01, error_psi=.01,
-        #            dx=dx, dy=dy, dz=dz,
-        #            theta=theta, phi=phi, psi=psi,
-        #            pedantic=False, print_level=0,
-        #            )
-        # m.migrad()
-
-        initial_position = (dx, dy, dz, theta, phi, psi)
-        # print(initial_position)
+        # Optimize parameters
         res = tfp.optimizer.differential_evolution_minimize(
             tm_sum,
-            initial_position=initial_position,
+            initial_position=params,
             # population_stddev=2.,
             seed=42,
-        )
-        dx, dy, dz, theta, phi, psi = res[2]
+        )  # TODO optimize hyperparams?
 
-        return tf.reduce_mean(tm_score(dx, dy, dz, theta, phi, psi))  # []
+        return tf.reduce_mean(tm_score(res[2]))  # []
 
 
 def get_matrix(dx, dy, dz, theta, phi, psi, name=None):
