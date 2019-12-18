@@ -410,11 +410,11 @@ def get_matrix(dx, dy, dz, theta, phi, psi, name=None):
         sy = tf.sin(phi)
         sz = tf.sin(psi)
 
-        nul = tf.constant(0.)
+        nul = tf.zeros(tf.shape(dx))
         matrix = tf.stack([[ cx * cz - sx * cy * sz,  cx * sz + sx * cy * cz, sx * sy, dx],
                            [-sx * cz - cx * cy * sz, -sx * sz + cx * cy * cz, cx * sy, dy],
                            [                sy * sz,                -sy * cz,      cy, dz],
-                           [nul, nul, nul, tf.constant(1.)]])
+                           [nul, nul, nul, tf.ones(tf.shape(dx))]])
         return matrix
 
 

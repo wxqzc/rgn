@@ -1,0 +1,8 @@
+
+*.pyc
+
+\.idea/
+
+logs/
+
+model/net_ops2\.py

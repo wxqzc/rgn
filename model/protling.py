@@ -30,6 +30,10 @@ TRAINING_OUTPUTS_DIRNAME   = 'outputsTraining'
 VALIDATION_OUTPUTS_DIRNAME = 'outputsValidation'
 TESTING_OUTPUTS_DIRNAME    = 'outputsTesting'
 
+# Set tensorflow debugging level
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+
+
 # exception classes
 class MilestoneError(RuntimeError):
     """ Exception raised for missing milestone """
