@@ -210,7 +210,7 @@ class RGNModel(object):
 
                 # Convert dihedrals into full 3D structures and compute dRMSDs
                 coordinates = _coordinates(merge_dicts(config.computing, config.optimization, config.queueing), dihedrals)
-                drmsds = _drmsds(merge_dicts(config.optimization, config.loss, config.io), coordinates, tertiaries, weights)
+                drmsds = _drmsds(merge_dicts(config.optimization, config.loss, config.io), coordinates, tertiaries, weights, num_stepss, config.optimization['batch_size'])
 
                 if mode == 'evaluation': 
                     prediction_ops.update({'ids': ids, 'coordinates': coordinates, 'num_stepss': num_stepss, 'recurrent_states': recurrent_states})
@@ -1007,8 +1007,8 @@ def _coordinates(config, dihedrals):
 
     return coordinates
 
-def _drmsds(config, coordinates, targets, weights):
-    """ Computes reduced weighted dRMSD loss (as specified by weights) 
+def _drmsds(config, coordinates, targets, weights, num_stepss, batch_size):
+    """ Computes reduced weighted dRMSD loss (as specified by weights)
         between predicted tertiary structures and targets. """
 
     # lose end residues if desired
@@ -1021,7 +1021,8 @@ def _drmsds(config, coordinates, targets, weights):
         targets     =     targets[1::NUM_DIHEDRALS] # [NUM_STEPS - NUM_EDGE_RESIDUES, BATCH_SIZE, NUM_DIMENSIONS]
                   
     # compute per structure dRMSDs
-    drmsds = drmsd(coordinates, targets, weights, name='drmsds') # [BATCH_SIZE]
+    # drmsds = drmsd(coordinates, targets, weights, name='drmsds') # [BATCH_SIZE]
+    drmsds = tmscore(coordinates, targets, weights, num_stepss, batch_size, name='tm_scores')
 
     # add to relevant collections for summaries, etc.
     if config['log_model_summaries']: tf.add_to_collection(config['name'] + '_drmsdss', drmsds)

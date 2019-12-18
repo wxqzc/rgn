@@ -15,14 +15,16 @@
     interface of tensorflow.models.rnn.rnn, which expects NUM_STEPS x [BATCH_SIZE, NUM_AAS].
 """
 
-__author__ = "Mohammed AlQuraishi"
+__author__ = "Mohammed AlQuraishi and Hermes Spaink"
 __copyright__ = "Copyright 2018, Harvard Medical School"
 __license__ = "MIT"
 
 # Imports
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
 import collections
+from iminuit import Minuit
 
 # Constants
 NUM_DIMENSIONS = 3
@@ -280,3 +282,196 @@ def pairwise_distance(u, name=None):
         norms = reduce_l2_norm(diffs, reduction_indices=[3], name=scope) # [NUM_STEPS, NUM_STEPS, BATCH_SIZE]
 
         return norms
+
+
+def tmscore(u, v, weights, num_steps, batch_size, name=None):
+    """ Computes the tm_score of two tensors of vectors.
+
+        vectors are assumed to be in the third dimension. Op is done element-wise over batch.
+    Args:
+        u, v:      [NUM_STEPS, BATCH_SIZE, NUM_DIMENSIONS]
+        weights:   [NUM_STEPS, NUM_STEPS, BATCH_SIZE]
+        num_steps: [BATCH_SIZE]
+        batch_size: constant
+
+    Returns:
+                   [BATCH_SIZE]
+    """
+
+    with tf.name_scope(name, 'TM_score', [u, v, weights, num_steps]) as scope:
+        u = tf.convert_to_tensor(u, name='u')
+        v = tf.convert_to_tensor(v, name='v')
+        weights = tf.convert_to_tensor(weights, name='weights')
+        num_steps = tf.convert_to_tensor(num_steps, name='num_steps')
+
+        # Prepare data and concat into one tensor along NUM_STEPS dimension
+        c1 = tf.map_fn(lambda x: tf.concat((x, tf.ones([batch_size, 1], dtype=tf.float32)), axis=-1),
+                       u)  # [NUM_STEPS, BATCH_SIZE, NUM_DIMENSIONS+1]
+        c2 = tf.map_fn(lambda x: tf.concat((x, tf.ones([batch_size, 1], dtype=tf.float32)), axis=-1),
+                       v)  # [NUM_STEPS, BATCH_SIZE, NUM_DIMENSIONS+1]
+        coords = tf.concat([c1, c2], axis=0)              # [2*NUM_STEPS, BATCH_SIZE, NUM_DIMENSIONS+1]
+        coords = tf.transpose(coords, perm=[1, 0, 2])     # [BATCH_SIZE, 2*NUM_STEPS, NUM_DIMENSIONS+1]
+
+        # d02 = (1.24 * (num_steps - 15.) ** (1. / 3.) - 1.8) ** 2.
+        d02 = (tf.constant(1.24) * (tf.dtypes.cast(num_steps, tf.float32) - tf.constant(15.)) ** tf.constant(
+            (1. / 3.)) - tf.constant(1.8)) ** tf.constant(2.)                             # [BATCH_SIZE]
+        dx, dy, dz, theta, phi, psi = get_default_values(c1, c2, batch_size, name=scope)  # [BATCH_SIZE]
+        params = tf.stack([dx, dy, dz, theta, phi, psi, d02], axis=1)                     # [BATCH_SIZE, 7]
+        params = tf.reshape(params, (batch_size, 7, 1))                                   # [BATCH_SIZE, 7, 1]
+        params = tf.pad(params, [[0, 0], [0, 0], [0, 3]])                                 # [BATCH_SIZE, 7, 4]
+
+        data = tf.concat([coords, params], axis=1)  # [BATCH_SIZE, 2*NUM_STEPS+7, NUM_DIMENSIONS+1]
+
+        tm_scores = tf.scan(minimize_tm, data, name=scope)  # [BATCH_SIZE]  # TODO fix dit! Zie docs
+
+        return tm_scores
+
+
+def minimize_tm(_, data, name=None):
+    """ Performs the tm_score minimization on a single coordinate pair.
+
+    Args:
+         data: [2*NUM_STEPS+7, NUM_DIMENSIONS+1]
+
+    Returns:
+                 []
+    """
+
+    with tf.name_scope(name, 'minimized_tm_score', [data]) as scope:
+        data = tf.convert_to_tensor(data, name='coords')
+
+        # TODO Gaat dit werken??
+        # Unpack data
+        coords = data[:-7, :]  # [2*NUM_STEPS, NUM_DIMENSIONS+1]
+        params = data[-7:, 0]  # [7]
+        c1, c2 = tf.split(coords, 2, axis=0)  # [NUM_STEPS, NUM_DIMENSIONS+1]
+        dx, dy, dz, theta, phi, psi, d02 = [tf.squeeze(i) for i in tf.split(params, 7, axis=0)]  # []
+
+        # Define scoring methods
+        def tm_score(dx, dy, dz, theta, phi, psi):
+            matrix = get_matrix(dx, dy, dz, theta, phi, psi, name=scope)  # [NUM_DIMENSIONS+1, NUM_DIMENSIONS+1]
+            dist = tf.matmul(c2, matrix) - c1                             # [NUM_STEPS, NUM_DIMENSIONS+1]
+            d_i2 = tf.reduce_sum(dist, axis=-1) ** 2                      # [NUM_STEPS]
+
+            one = tf.constant(1.)
+            tm = one / (one + (d_i2 / d02))                               # [NUM_STEPS]
+            return tm
+
+        def tm_sum(dx, dy, dz, theta, phi, psi):
+            return tf.reduce_sum(tm_score(dx, dy, dz, theta, phi, psi))
+
+        # Minimize parameters
+
+        # m = Minuit(tm_sum,
+        #            error_dx=1., error_dy=1., error_dz=1.,
+        #            error_theta=.01, error_phi=.01, error_psi=.01,
+        #            dx=dx, dy=dy, dz=dz,
+        #            theta=theta, phi=phi, psi=psi,
+        #            pedantic=False, print_level=0,
+        #            )
+        # m.migrad()
+
+        initial_position = (dx, dy, dz, theta, phi, psi)
+        # print(initial_position)
+        res = tfp.optimizer.differential_evolution_minimize(
+            tm_sum,
+            initial_position=initial_position,
+            # population_stddev=2.,
+            seed=42,
+        )
+        dx, dy, dz, theta, phi, psi = res[2]
+
+        return tf.reduce_mean(tm_score(dx, dy, dz, theta, phi, psi))  # []
+
+
+def get_matrix(dx, dy, dz, theta, phi, psi, name=None):
+    """ Compute rotation-translation matrix from angles and displacements
+
+    Args:
+         dx, dy, dz, theta, phi, psi: []
+
+    Returns:
+        [4, 4]
+    """
+
+    with tf.name_scope(name, 'get_matrix', [dx, dy, dz, theta, phi, psi]) as scope:
+        dx = tf.convert_to_tensor(dx, name='dx')
+        dy = tf.convert_to_tensor(dy, name='dy')
+        dz = tf.convert_to_tensor(dz, name='dz')
+        theta = tf.convert_to_tensor(theta, name='theta')
+        phi = tf.convert_to_tensor(phi, name='phi')
+        psi = tf.convert_to_tensor(psi, name='psi')
+
+        cx = tf.cos(theta)
+        cy = tf.cos(phi)
+        cz = tf.cos(psi)
+
+        sx = tf.sin(theta)
+        sy = tf.sin(phi)
+        sz = tf.sin(psi)
+
+        nul = tf.constant(0.)
+        matrix = tf.stack([[ cx * cz - sx * cy * sz,  cx * sz + sx * cy * cz, sx * sy, dx],
+                           [-sx * cz - cx * cy * sz, -sx * sz + cx * cy * cz, cx * sy, dy],
+                           [                sy * sz,                -sy * cz,      cy, dz],
+                           [nul, nul, nul, tf.constant(1.)]])
+        return matrix
+
+
+def get_default_values(c1, c2, batch_size, name=None):
+    """ Make a crude estimation of the alignment using the center of mass
+        and general orientation of the protein.
+
+    Args:
+        c1, c2: [NUM_STEPS, BATCH_SIZE, NUM_DIMENSIONS+1]
+
+    Returns:
+        dx, dy, dz, theta, phi, psi:      [BATCH_SIZE]
+
+    """
+
+    with tf.name_scope(name, 'default_vals', [c1, c2]) as scope:
+        c1 = tf.convert_to_tensor(c1, name='c1')
+        c2 = tf.convert_to_tensor(c2, name='c2')
+
+        dx, dy, dz, _ = tf.unstack(tf.reduce_mean(c1 - c2, axis=0), axis=1)     # [BATCH_SIZE]
+
+        vec1 = tf.reduce_mean(tf.split(c1, [3, 1], axis=-1)[0], axis=0)         # [BATCH_SIZE, NUM_DIMENSIONS]
+        vec2 = tf.reduce_mean(tf.split(c2, [3, 1], axis=-1)[0], axis=0)         # [BATCH_SIZE, NUM_DIMENSIONS]
+
+        #  Find the rotation matrix that converts vec1 into vec2
+        #  http://math.stackexchange.com/questions/180418/#476311
+        v = tf.linalg.cross(vec1, vec2)                                         # [BATCH_SIZE, NUM_DIMENSIONS]
+        s = tf.add(tf.norm(v, axis=-1), tf.constant(np.finfo(np.float32).eps))  # [BATCH_SIZE]
+        c = tf.reduce_sum(tf.multiply(vec1, vec2), axis=-1)                     # [BATCH_SIZE]
+
+        #  skew-symmetric cross-product matrix
+        def sscpm(v):
+            v0, v1, v2 = tf.split(v, 3, axis=-1)
+            v0, v1, v2 = tf.squeeze(v0), tf.squeeze(v1), tf.squeeze(v2)
+            nul = tf.constant(.0)
+            return tf.stack([tf.stack([nul, -v2, v1]),
+                             tf.stack([v2, nul, -v0]),
+                             tf.stack([-v1, v0, nul])])
+
+        vx = tf.map_fn(sscpm, v)  # [BATCH_SIZE, NUM_DIMENSIONS, NUM_DIMENSIONS]
+        rot_mat = tf.eye(3, batch_shape=[batch_size]) + vx + (vx ** tf.constant(2.)) * tf.reshape(
+                                                                (tf.constant(1.) - c) / (s ** tf.constant(2.)),
+                                                                (batch_size, 1, 1))
+
+        # Recover the angles from the matrix as seen here:
+        # http://nghiaho.com/?page_id=846
+        def _theta(rm):
+            return tf.atan2(rm[2, 1], rm[2, 2])
+
+        def _phi(rm):
+            return tf.atan2(-rm[2, 0], tf.sqrt(rm[2, 1] ** tf.constant(2.) + rm[2, 2] ** tf.constant(2.)))
+
+        def _psi(rm):
+            return tf.atan2(rm[1, 0], rm[0, 0])
+
+        theta = tf.map_fn(_theta, rot_mat)
+        phi   = tf.map_fn(_phi, rot_mat)
+        psi   = tf.map_fn(_psi, rot_mat)
+
+        return dx, dy, dz, theta, phi, psi
